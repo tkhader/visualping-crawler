@@ -1,6 +1,7 @@
 import json
 import os
 import re
+from datetime import timedelta
 from urllib.parse import urljoin, urlparse
 
 from bs4 import BeautifulSoup
@@ -36,7 +37,7 @@ async def main() -> None:
 
     crawler = PlaywrightCrawler(
         max_requests_per_crawl=MAX_REQUESTS,
-        request_handler_timeout=30,
+        request_handler_timeout=timedelta(seconds=30),
         max_request_retries=2,
     )
 
