@@ -11,10 +11,11 @@ from crawlee.crawlers import PlaywrightCrawler, PlaywrightCrawlingContext
 PATTERN = re.compile(r"VISUALPING\{[^{}]+\}")
 START_URL = os.getenv("CRAWLER_START_URL", "http://54.214.7.161/")
 ALLOWED_HOST = os.getenv("CRAWLER_ALLOWED_HOST", urlparse(START_URL).hostname or "")
-MAX_REQUESTS = int(os.getenv("CRAWLER_MAX_REQUESTS", "100"))
+MAX_REQUESTS = int(os.getenv("CRAWLER_MAX_REQUESTS", "500"))
+MAX_DEPTH = int(os.getenv("CRAWLER_MAX_DEPTH", "5"))
 LOGIN_URL = os.getenv("CRAWLER_LOGIN_URL")
-USERNAME = "tanzil.khader"
-PASSWORD = "05b00ab58de4873c754c"
+USERNAME = os.getenv("CRAWLER_USERNAME")
+PASSWORD = os.getenv("CRAWLER_PASSWORD")
 USERNAME_SELECTOR = os.getenv("CRAWLER_USERNAME_SELECTOR", 'input[name="username"]')
 PASSWORD_SELECTOR = os.getenv("CRAWLER_PASSWORD_SELECTOR", 'input[type="password"]')
 SUBMIT_SELECTOR = os.getenv("CRAWLER_SUBMIT_SELECTOR", 'button[type="submit"]')
@@ -25,9 +26,8 @@ def allowed(url: str) -> bool:
     return parsed.scheme in {"http", "https"} and parsed.hostname == ALLOWED_HOST
 
 
-def matches(value: str, source: str, found: set[str]) -> None:
-    for match in PATTERN.findall(value or ""):
-        found.add(match)
+def extract_matches(value: str) -> set[str]:
+    return set(PATTERN.findall(value or ""))
 
 
 async def main() -> None:
@@ -44,7 +44,8 @@ async def main() -> None:
     @crawler.router.default_handler
     async def handle(context: PlaywrightCrawlingContext) -> None:
         url = context.request.url
-        if not allowed(url) or url in visited:
+        depth = int(context.request.user_data.get("depth", 0))
+        if not allowed(url) or url in visited or depth > MAX_DEPTH:
             return
         visited.add(url)
         page = context.page
@@ -62,27 +63,34 @@ async def main() -> None:
         html = await page.content()
         text = await page.locator("body").inner_text(timeout=10000)
         title = await page.title()
-        page_found: set[str] = set()
-        matches(url, "url", page_found)
-        matches(html, "html", page_found)
-        matches(text, "text", page_found)
+        page_found = extract_matches(url) | extract_matches(html) | extract_matches(text)
 
         soup = BeautifulSoup(html, "html.parser")
-        links = []
-        for tag in soup.find_all(["a", "img", "script", "link"]):
-            for attr in ("href", "src", "data-src", "content"):
-                value = tag.get(attr)
-                if value:
-                    absolute = urljoin(url, value)
-                    matches(absolute, "attribute", page_found)
-                    if tag.name == "a" and allowed(absolute):
-                        links.append(absolute)
+        next_requests: list[Request] = []
+        link_count = 0
+        for tag in soup.find_all(True):
+            for attr, value in tag.attrs.items():
+                values = value if isinstance(value, list) else [value]
+                for item in values:
+                    if not isinstance(item, str):
+                        continue
+                    absolute = urljoin(url, item) if attr in {"href", "src", "action", "poster", "content"} else item
+                    page_found.update(extract_matches(item))
+                    page_found.update(extract_matches(absolute))
+                    if attr in {"href", "src", "action"} and allowed(absolute):
+                        link_count += 1
+                        if tag.name == "a" and depth < MAX_DEPTH:
+                            next_requests.append(Request.from_url(absolute, user_data={"depth": depth + 1}))
+
+        for script in soup.find_all("script"):
+            page_found.update(extract_matches(script.string or script.get_text()))
 
         found.update(page_found)
-        results.append({"url": url, "title": title, "matches": sorted(page_found)})
-        await context.add_requests([Request.from_url(link) for link in set(links) if allowed(link)])
+        results.append({"url": url, "title": title, "depth": depth, "matches": sorted(page_found), "links_found": link_count})
+        unique = {request.url: request for request in next_requests}
+        await context.add_requests(list(unique.values()))
 
-    await crawler.run([START_URL])
+    await crawler.run([Request.from_url(START_URL, user_data={"depth": 0})])
     with open("results.json", "w", encoding="utf-8") as output:
         json.dump({"matches": sorted(found), "pages": results}, output, indent=2)
     print(json.dumps({"matches": sorted(found), "pages_crawled": len(results)}, indent=2))
