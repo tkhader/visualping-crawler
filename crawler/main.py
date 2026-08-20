@@ -9,6 +9,9 @@ from crawlee import Request
 from crawlee.crawlers import PlaywrightCrawler, PlaywrightCrawlingContext
 
 PATTERN = re.compile(r"VISUALPING\{[0-9a-f]{16}\}")
+URL_PATTERN = re.compile(r"(?:https?://|/)[^\"'\s<>`]+")
+CSS_URL_PATTERN = re.compile(r"url\(\s*[\"']?([^\"')]+)")
+EXAMPLE_MARKER = "VISUALPING{0000deadbeef0000}"
 START_URL = os.getenv("CRAWLER_START_URL", "http://54.214.7.161/")
 ALLOWED_HOST = os.getenv("CRAWLER_ALLOWED_HOST", urlparse(START_URL).hostname or "")
 MAX_REQUESTS = int(os.getenv("CRAWLER_MAX_REQUESTS", "500"))
@@ -23,7 +26,14 @@ def allowed(url: str) -> bool:
 
 
 def extract_matches(value: str) -> set[str]:
-    return set(PATTERN.findall(value or ""))
+    return {match for match in PATTERN.findall(value or "") if match != EXAMPLE_MARKER}
+
+
+def absolute_candidate(value: str, base_url: str) -> str | None:
+    if not value or value.startswith(("#", "mailto:", "javascript:", "data:", "tel:")):
+        return None
+    candidate = urljoin(base_url, value.strip())
+    return candidate if allowed(candidate) else None
 
 
 async def main() -> None:
@@ -42,7 +52,7 @@ async def main() -> None:
     crawler = PlaywrightCrawler(
         max_requests_per_crawl=MAX_REQUESTS,
         request_handler_timeout=timedelta(seconds=30),
-        max_request_retries=2,
+        max_request_retries=1,
         browser_new_context_options=context_options,
     )
 
@@ -59,31 +69,47 @@ async def main() -> None:
         text = await page.locator("body").inner_text(timeout=10000)
         title = await page.title()
         page_found = extract_matches(url) | extract_matches(html) | extract_matches(text)
+        candidates: set[str] = set()
 
         soup = BeautifulSoup(html, "html.parser")
-        next_requests: list[Request] = []
-        link_count = 0
         for tag in soup.find_all(True):
             for attr, value in tag.attrs.items():
                 values = value if isinstance(value, list) else [value]
                 for item in values:
                     if not isinstance(item, str):
                         continue
-                    absolute = urljoin(url, item) if attr in {"href", "src", "action", "poster", "content"} else item
                     page_found.update(extract_matches(item))
-                    page_found.update(extract_matches(absolute))
-                    if attr in {"href", "src", "action"} and allowed(absolute):
-                        link_count += 1
-                        if tag.name == "a" and depth < MAX_DEPTH:
-                            next_requests.append(Request.from_url(absolute, user_data={"depth": depth + 1}))
+                    for raw in URL_PATTERN.findall(item):
+                        candidate = absolute_candidate(raw, url)
+                        if candidate:
+                            candidates.add(candidate)
+                    for raw in CSS_URL_PATTERN.findall(item):
+                        candidate = absolute_candidate(raw, url)
+                        if candidate:
+                            candidates.add(candidate)
 
         for script in soup.find_all("script"):
-            page_found.update(extract_matches(script.string or script.get_text()))
+            script_text = script.string or script.get_text()
+            page_found.update(extract_matches(script_text))
+            for raw in URL_PATTERN.findall(script_text):
+                candidate = absolute_candidate(raw, url)
+                if candidate:
+                    candidates.add(candidate)
+
+        try:
+            resource_urls = await page.evaluate("performance.getEntriesByType('resource').map(e => e.name)")
+            for resource_url in resource_urls:
+                candidate = absolute_candidate(resource_url, url)
+                if candidate:
+                    candidates.add(candidate)
+        except Exception:
+            pass
 
         found.update(page_found)
-        results.append({"url": url, "title": title, "depth": depth, "matches": sorted(page_found), "links_found": link_count})
-        unique = {request.url: request for request in next_requests}
-        await context.add_requests(list(unique.values()))
+        results.append({"url": url, "title": title, "depth": depth, "matches": sorted(page_found), "links_found": len(candidates)})
+        if depth < MAX_DEPTH:
+            requests = [Request.from_url(link, user_data={"depth": depth + 1}) for link in candidates]
+            await context.add_requests(requests)
 
     await crawler.run([Request.from_url(START_URL, user_data={"depth": 0})])
     with open("results.json", "w", encoding="utf-8") as output:
