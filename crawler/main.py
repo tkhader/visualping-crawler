@@ -7,10 +7,16 @@ from bs4 import BeautifulSoup
 from crawlee import Request
 from crawlee.crawlers import PlaywrightCrawler, PlaywrightCrawlingContext
 
-PATTERN = re.compile(r"VISUALPING\\{[^{}]+\\}")
+PATTERN = re.compile(r"VISUALPING\{[^{}]+\}")
 START_URL = os.getenv("CRAWLER_START_URL", "http://54.214.7.161/")
 ALLOWED_HOST = os.getenv("CRAWLER_ALLOWED_HOST", urlparse(START_URL).hostname or "")
 MAX_REQUESTS = int(os.getenv("CRAWLER_MAX_REQUESTS", "100"))
+LOGIN_URL = os.getenv("CRAWLER_LOGIN_URL")
+USERNAME = os.getenv("CRAWLER_USERNAME")
+PASSWORD = os.getenv("CRAWLER_PASSWORD")
+USERNAME_SELECTOR = os.getenv("CRAWLER_USERNAME_SELECTOR", 'input[name="username"]')
+PASSWORD_SELECTOR = os.getenv("CRAWLER_PASSWORD_SELECTOR", 'input[type="password"]')
+SUBMIT_SELECTOR = os.getenv("CRAWLER_SUBMIT_SELECTOR", 'button[type="submit"]')
 
 
 def allowed(url: str) -> bool:
@@ -41,6 +47,17 @@ async def main() -> None:
             return
         visited.add(url)
         page = context.page
+
+        if LOGIN_URL and USERNAME is not None and PASSWORD is not None and url == START_URL:
+            if not allowed(LOGIN_URL):
+                raise ValueError("CRAWLER_LOGIN_URL must use the allowed host")
+            await page.goto(LOGIN_URL, wait_until="domcontentloaded")
+            await page.locator(USERNAME_SELECTOR).fill(USERNAME)
+            await page.locator(PASSWORD_SELECTOR).fill(PASSWORD)
+            await page.locator(SUBMIT_SELECTOR).click()
+            await page.wait_for_load_state("domcontentloaded")
+            url = page.url
+
         html = await page.content()
         text = await page.locator("body").inner_text(timeout=10000)
         title = await page.title()
