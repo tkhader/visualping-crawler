@@ -1,4 +1,3 @@
-import base64
 import json
 import os
 import re
@@ -9,7 +8,7 @@ from bs4 import BeautifulSoup
 from crawlee import Request
 from crawlee.crawlers import PlaywrightCrawler, PlaywrightCrawlingContext
 
-PATTERN = re.compile(r"VISUALPING\{[^{}]+\}")
+PATTERN = re.compile(r"VISUALPING\{[0-9a-f]{16}\}")
 START_URL = os.getenv("CRAWLER_START_URL", "http://54.214.7.161/")
 ALLOWED_HOST = os.getenv("CRAWLER_ALLOWED_HOST", urlparse(START_URL).hostname or "")
 MAX_REQUESTS = int(os.getenv("CRAWLER_MAX_REQUESTS", "500"))
@@ -34,9 +33,10 @@ async def main() -> None:
 
     context_options = {}
     if USERNAME is not None and PASSWORD is not None:
-        token = base64.b64encode(f"{USERNAME}:{PASSWORD}".encode()).decode()
-        context_options["extra_http_headers"] = {
-            "Authorization": f"Basic {token}"
+        context_options["http_credentials"] = {
+            "username": USERNAME,
+            "password": PASSWORD,
+            "send": "always",
         }
 
     crawler = PlaywrightCrawler(
