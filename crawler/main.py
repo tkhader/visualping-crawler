@@ -1,3 +1,4 @@
+import base64
 import json
 import os
 import re
@@ -33,11 +34,9 @@ async def main() -> None:
 
     context_options = {}
     if USERNAME is not None and PASSWORD is not None:
-        context_options["http_credentials"] = {
-            "username": USERNAME,
-            "password": PASSWORD,
-            "origin": f"http://{ALLOWED_HOST}",
-            "send": "always",
+        token = base64.b64encode(f"{USERNAME}:{PASSWORD}".encode()).decode()
+        context_options["extra_http_headers"] = {
+            "Authorization": f"Basic {token}"
         }
 
     crawler = PlaywrightCrawler(
