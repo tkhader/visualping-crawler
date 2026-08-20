@@ -13,12 +13,8 @@ START_URL = os.getenv("CRAWLER_START_URL", "http://54.214.7.161/")
 ALLOWED_HOST = os.getenv("CRAWLER_ALLOWED_HOST", urlparse(START_URL).hostname or "")
 MAX_REQUESTS = int(os.getenv("CRAWLER_MAX_REQUESTS", "500"))
 MAX_DEPTH = int(os.getenv("CRAWLER_MAX_DEPTH", "5"))
-LOGIN_URL = os.getenv("CRAWLER_LOGIN_URL")
 USERNAME = os.getenv("CRAWLER_USERNAME")
 PASSWORD = os.getenv("CRAWLER_PASSWORD")
-USERNAME_SELECTOR = os.getenv("CRAWLER_USERNAME_SELECTOR", 'input[name="username"]')
-PASSWORD_SELECTOR = os.getenv("CRAWLER_PASSWORD_SELECTOR", 'input[type="password"]')
-SUBMIT_SELECTOR = os.getenv("CRAWLER_SUBMIT_SELECTOR", 'button[type="submit"]')
 
 
 def allowed(url: str) -> bool:
@@ -35,10 +31,20 @@ async def main() -> None:
     visited: set[str] = set()
     results: list[dict] = []
 
+    context_options = {}
+    if USERNAME is not None and PASSWORD is not None:
+        context_options["http_credentials"] = {
+            "username": USERNAME,
+            "password": PASSWORD,
+            "origin": f"http://{ALLOWED_HOST}",
+            "send": "always",
+        }
+
     crawler = PlaywrightCrawler(
         max_requests_per_crawl=MAX_REQUESTS,
         request_handler_timeout=timedelta(seconds=30),
         max_request_retries=2,
+        browser_new_context_options=context_options,
     )
 
     @crawler.router.default_handler
@@ -49,16 +55,6 @@ async def main() -> None:
             return
         visited.add(url)
         page = context.page
-
-        if LOGIN_URL and USERNAME is not None and PASSWORD is not None and url == START_URL:
-            if not allowed(LOGIN_URL):
-                raise ValueError("CRAWLER_LOGIN_URL must use the allowed host")
-            await page.goto(LOGIN_URL, wait_until="domcontentloaded")
-            await page.locator(USERNAME_SELECTOR).fill(USERNAME)
-            await page.locator(PASSWORD_SELECTOR).fill(PASSWORD)
-            await page.locator(SUBMIT_SELECTOR).click()
-            await page.wait_for_load_state("domcontentloaded")
-            url = page.url
 
         html = await page.content()
         text = await page.locator("body").inner_text(timeout=10000)
