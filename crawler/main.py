@@ -12,8 +12,8 @@ START_URL = os.getenv("CRAWLER_START_URL", "http://54.214.7.161/")
 ALLOWED_HOST = os.getenv("CRAWLER_ALLOWED_HOST", urlparse(START_URL).hostname or "")
 MAX_REQUESTS = int(os.getenv("CRAWLER_MAX_REQUESTS", "100"))
 LOGIN_URL = os.getenv("CRAWLER_LOGIN_URL")
-USERNAME = os.getenv("CRAWLER_USERNAME")
-PASSWORD = os.getenv("CRAWLER_PASSWORD")
+USERNAME = "tanzil.khader"
+PASSWORD = "05b00ab58de4873c754c"
 USERNAME_SELECTOR = os.getenv("CRAWLER_USERNAME_SELECTOR", 'input[name="username"]')
 PASSWORD_SELECTOR = os.getenv("CRAWLER_PASSWORD_SELECTOR", 'input[type="password"]')
 SUBMIT_SELECTOR = os.getenv("CRAWLER_SUBMIT_SELECTOR", 'button[type="submit"]')
