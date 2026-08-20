@@ -1,0 +1,9 @@
+crawlee[playwright]>=1.0.0
+beautifulsoup4>=4.12.0
+trafilatura>=2.0.0
+pydantic>=2.0.0
+httpx>=0.27.0
+pymupdf>=1.24.0
+pytesseract>=0.3.13
+Pillow>=10.0.0
+pytest>=8.0.0
