@@ -167,7 +167,24 @@ async def main() -> None:
         html = await page.content()
         text = await page.locator("body").inner_text(timeout=10000)
         title = await page.title()
-        page_found = extract_matches(url) | extract_matches(html) | extract_matches(text)
+        page_found = extract_matches(url) | extract_matches(html) | extract_matches(text) | extract_matches(title)
+
+        # Check the main navigation response headers too (not just asset fetches).
+        try:
+            main_response = context.response
+            if main_response is not None:
+                header_text = " ".join(f"{k}: {v}" for k, v in (await main_response.all_headers()).items())
+                page_found.update(extract_matches(header_text))
+        except Exception:
+            pass
+
+        # Cookies can carry flags too.
+        try:
+            cookies = await page.context.cookies()
+            cookie_text = " ".join(f"{c.get('name')}={c.get('value')}" for c in cookies)
+            page_found.update(extract_matches(cookie_text))
+        except Exception:
+            pass
         candidates: set[str] = set()
         soup = BeautifulSoup(html, "html.parser")
 
@@ -216,6 +233,67 @@ async def main() -> None:
         images = image_candidates(soup, url)
         await scan_images(images)
         found.update(extract_matches(" ".join(images)))
+
+        # Canvas-drawn text is invisible to page.content() and to <img> OCR --
+        # it only exists as pixels painted by JS. Screenshot each canvas and OCR it.
+        try:
+            canvas_count = await page.locator("canvas").count()
+            for i in range(canvas_count):
+                try:
+                    canvas_bytes = await page.locator("canvas").nth(i).screenshot(timeout=5000)
+                    canvas_image = Image.open(BytesIO(canvas_bytes))
+                    ocr_text = pytesseract.image_to_string(canvas_image)
+                    canvas_matches = extract_matches(ocr_text)
+                    if canvas_matches:
+                        found.update(canvas_matches)
+                        page_found.update(canvas_matches)
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+        # Click-to-reveal content: buttons/toggles that only render their text
+        # (or swap in real content) after interaction. Click anything plausible,
+        # then re-scan the DOM. Cheap and safe since this is a read-only crawl.
+        try:
+            reveal_selector = (
+                "button, [role='button'], summary, "
+                "[class*='reveal'], [class*='toggle'], [class*='accordion'], "
+                "[class*='expand'], [class*='show'], [aria-expanded='false']"
+            )
+            reveal_count = await page.locator(reveal_selector).count()
+            for i in range(min(reveal_count, 40)):  # cap to avoid pathological pages
+                try:
+                    el = page.locator(reveal_selector).nth(i)
+                    if await el.is_visible():
+                        await el.click(timeout=2000, force=True)
+                        await page.wait_for_timeout(200)
+                except Exception:
+                    continue
+            if reveal_count:
+                post_click_html = await page.content()
+                post_click_text = await page.locator("body").inner_text(timeout=10000)
+                revealed = extract_matches(post_click_html) | extract_matches(post_click_text)
+                if revealed:
+                    found.update(revealed)
+                    page_found.update(revealed)
+        except Exception:
+            pass
+
+        # Iframes are separate documents -- BeautifulSoup on the parent HTML
+        # never sees their content. Walk each child frame directly.
+        for frame in page.frames:
+            if frame == page.main_frame:
+                continue
+            try:
+                frame_html = await frame.content()
+                frame_text = await frame.locator("body").inner_text(timeout=5000)
+                frame_matches = extract_matches(frame_html) | extract_matches(frame_text)
+                if frame_matches:
+                    found.update(frame_matches)
+                    page_found.update(frame_matches)
+            except Exception:
+                continue
 
         # Sort every candidate URL (from attributes/scripts above) into the right bucket
         # instead of queuing everything as a page navigation.
