@@ -40,6 +40,15 @@ TEXT_RESOURCE_EXTENSIONS = {
 DOCUMENT_EXTENSIONS = {".pdf"}
 ARCHIVE_EXTENSIONS = {".zip"}
 
+# Pages that 403 for every normal request turned out to be geofenced
+# (e.g. /status/eu-region/ only serves 200 to German IPs). We can't get
+# a real browser to originate from another country, so known geofenced
+# paths are retried post-crawl through a local Tor SOCKS proxy exited
+# in the required region, via a plain httpx GET (no need for a full
+# browser context for a static status page).
+TOR_PROXY = os.getenv("CRAWLER_TOR_PROXY", "socks5://127.0.0.1:9050")
+KNOWN_GEOFENCED_PATHS = ["/status/eu-region/"]
+
 
 def allowed(url: str) -> bool:
     parsed = urlparse(url)
@@ -456,6 +465,31 @@ async def main() -> None:
             await context.add_requests([Request.from_url(link, user_data={"depth": depth + 1}) for link in page_candidates])
 
     await crawler.run([Request.from_url(START_URL, user_data={"depth": 0})])
+
+    # Retry known geofenced pages through Tor (or another configured proxy)
+    # exited in the required region, since a normal browser/httpx request
+    # from this machine's real IP will always get a 403 for these.
+    geofenced_results: list[dict] = []
+    if USERNAME and PASSWORD:
+        try:
+            async with httpx.AsyncClient(auth=(USERNAME, PASSWORD), proxy=TOR_PROXY, timeout=30) as tor_client:
+                for path in KNOWN_GEOFENCED_PATHS:
+                    geofenced_url = urljoin(START_URL, path)
+                    try:
+                        response = await tor_client.get(geofenced_url)
+                        matches = extract_matches(response.text) if response.status_code == 200 else set()
+                        record(matches, f"geofenced_page:{geofenced_url}")
+                        geofenced_results.append({
+                            "url": geofenced_url,
+                            "status_code": response.status_code,
+                            "matches": sorted(matches),
+                        })
+                    except httpx.HTTPError as e:
+                        geofenced_results.append({"url": geofenced_url, "error": str(e)})
+        except Exception as e:
+            # Proxy not available (Tor not running, etc.) -- don't fail the whole run over it.
+            geofenced_results.append({"error": f"proxy unavailable: {e}"})
+
     with open("results.json", "w", encoding="utf-8") as output:
         json.dump(
             {
@@ -464,6 +498,7 @@ async def main() -> None:
                 "pages": results,
                 "images": image_results,
                 "text_resources": resource_results,
+                "geofenced_pages": geofenced_results,
             },
             output,
             indent=2,
