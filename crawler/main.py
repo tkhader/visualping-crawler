@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import re
@@ -18,6 +19,7 @@ MAX_REQUESTS = int(os.getenv("CRAWLER_MAX_REQUESTS", "500"))
 MAX_DEPTH = int(os.getenv("CRAWLER_MAX_DEPTH", "5"))
 USERNAME = os.getenv("CRAWLER_USERNAME")
 PASSWORD = os.getenv("CRAWLER_PASSWORD")
+TEXT_CONTENT_TYPES = ("text/", "application/json", "application/javascript", "application/xml", "application/xhtml+xml")
 
 
 def allowed(url: str) -> bool:
@@ -40,6 +42,7 @@ async def main() -> None:
     found: set[str] = set()
     visited: set[str] = set()
     results: list[dict] = []
+    response_matches: list[dict] = []
 
     context_options = {}
     if USERNAME is not None and PASSWORD is not None:
@@ -64,6 +67,24 @@ async def main() -> None:
             return
         visited.add(url)
         page = context.page
+
+        async def scan_response(response) -> None:
+            if not allowed(response.url):
+                return
+            content_type = response.headers.get("content-type", "").lower()
+            if not any(content_type.startswith(prefix) for prefix in TEXT_CONTENT_TYPES):
+                return
+            try:
+                body = await response.text()
+            except Exception:
+                return
+            matches = extract_matches(body)
+            if matches:
+                found.update(matches)
+                response_matches.append({"url": response.url, "content_type": content_type, "matches": sorted(matches)})
+
+        page.on("response", lambda response: asyncio.create_task(scan_response(response)))
+        await page.wait_for_load_state("networkidle", timeout=15000)
 
         html = await page.content()
         text = await page.locator("body").inner_text(timeout=10000)
@@ -112,11 +133,11 @@ async def main() -> None:
             await context.add_requests(requests)
 
     await crawler.run([Request.from_url(START_URL, user_data={"depth": 0})])
+    await asyncio.sleep(1)
     with open("results.json", "w", encoding="utf-8") as output:
-        json.dump({"matches": sorted(found), "pages": results}, output, indent=2)
-    print(json.dumps({"matches": sorted(found), "pages_crawled": len(results)}, indent=2))
+        json.dump({"matches": sorted(found), "pages": results, "response_matches": response_matches}, output, indent=2)
+    print(json.dumps({"matches": sorted(found), "pages_crawled": len(results), "response_matches": len(response_matches)}, indent=2))
 
 
 if __name__ == "__main__":
-    import asyncio
     asyncio.run(main())
