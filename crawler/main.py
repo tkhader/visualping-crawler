@@ -84,6 +84,7 @@ async def main() -> None:
     results: list[dict] = []
     image_results: list[dict] = []
     resource_results: list[dict] = []
+    debug_counts = {"canvas_seen": 0, "reveal_clicks": 0, "iframes_seen": 0, "pages_with_canvas": 0, "pages_with_iframe": 0}
 
     def record(matches: set[str], source: str) -> None:
         for m in matches:
@@ -249,6 +250,9 @@ async def main() -> None:
         # it only exists as pixels painted by JS. Screenshot each canvas and OCR it.
         try:
             canvas_count = await page.locator("canvas").count()
+            if canvas_count:
+                debug_counts["canvas_seen"] += canvas_count
+                debug_counts["pages_with_canvas"] += 1
             for i in range(canvas_count):
                 try:
                     canvas_bytes = await page.locator("canvas").nth(i).screenshot(timeout=5000)
@@ -278,6 +282,7 @@ async def main() -> None:
                     el = page.locator(reveal_selector).nth(i)
                     if await el.is_visible():
                         await el.click(timeout=2000, force=True)
+                        debug_counts["reveal_clicks"] += 1
                         await page.wait_for_timeout(200)
                 except Exception:
                     continue
@@ -296,6 +301,7 @@ async def main() -> None:
         for frame in page.frames:
             if frame == page.main_frame:
                 continue
+            debug_counts["iframes_seen"] += 1
             try:
                 frame_html = await frame.content()
                 frame_text = await frame.locator("body").inner_text(timeout=5000)
@@ -320,13 +326,23 @@ async def main() -> None:
                 page_candidates.add(candidate)
 
         try:
-            resource_urls = await page.evaluate("performance.getEntriesByType('resource').map(e => e.name)")
-            for resource_url in resource_urls:
+            resource_entries = await page.evaluate(
+                "performance.getEntriesByType('resource').map(e => ({name: e.name, initiatorType: e.initiatorType}))"
+            )
+            for entry in resource_entries:
+                resource_url = entry.get("name")
+                initiator = entry.get("initiatorType", "")
                 candidate = absolute_candidate(resource_url, url)
                 if not candidate:
                     continue
                 kind = resource_kind(candidate)
-                if kind == "image":
+                # fetch()/XHR calls often hit extension-less API endpoints
+                # (e.g. /status/eu-region/) that resource_kind() can't classify
+                # by extension alone -- treat those as text resources too,
+                # never as page navigations, regardless of extension.
+                if initiator in ("fetch", "xmlhttprequest"):
+                    text_resource_candidates.add(candidate)
+                elif kind == "image":
                     images.add(candidate)
                 elif kind == "text_resource":
                     text_resource_candidates.add(candidate)
@@ -356,7 +372,7 @@ async def main() -> None:
             output,
             indent=2,
         )
-    print(json.dumps({"matches": sorted(found), "pages_crawled": len(results), "images_processed": len(image_results), "text_resources_processed": len(resource_results)}, indent=2))
+    print(json.dumps({"matches": sorted(found), "pages_crawled": len(results), "images_processed": len(image_results), "text_resources_processed": len(resource_results), "debug_counts": debug_counts}, indent=2))
 
 
 if __name__ == "__main__":
