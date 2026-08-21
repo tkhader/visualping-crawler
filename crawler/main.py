@@ -426,10 +426,16 @@ async def main() -> None:
                 kind = resource_kind(candidate)
                 # fetch()/XHR calls often hit extension-less API endpoints
                 # (e.g. /status/eu-region/) that resource_kind() can't classify
-                # by extension alone -- treat those as text resources too,
-                # never as page navigations, regardless of extension.
+                # by extension alone -- scan those as raw text too. But don't
+                # treat "fetched via JS" and "is a real page" as mutually
+                # exclusive: some sites prefetch actual page navigations via
+                # fetch(), and excluding those from page_candidates entirely
+                # shrinks the reachable link graph (confirmed: dropped page
+                # coverage from 566 -> 371 pages when this was exclusive).
                 if initiator in ("fetch", "xmlhttprequest"):
                     text_resource_candidates.add(candidate)
+                    if kind == "page":
+                        page_candidates.add(candidate)
                 elif kind == "image":
                     images.add(candidate)
                 elif kind == "text_resource":
@@ -503,7 +509,7 @@ async def main() -> None:
             output,
             indent=2,
         )
-    print(json.dumps({"matches": sorted(found), "pages_crawled": len(results), "images_processed": len(image_results), "text_resources_processed": len(resource_results), "debug_counts": debug_counts}, indent=2))
+    print(json.dumps({"matches": sorted(found), "pages_crawled": len(results), "images_processed": len(image_results), "text_resources_processed": len(resource_results), "geofenced_pages": geofenced_results, "debug_counts": debug_counts}, indent=2))
 
 
 if __name__ == "__main__":
