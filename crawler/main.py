@@ -8,7 +8,7 @@ from urllib.parse import urljoin, urlparse
 
 import httpx
 import pytesseract
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Comment
 from crawlee import Request
 from crawlee.crawlers import PlaywrightCrawler, PlaywrightCrawlingContext
 from PIL import Image, UnidentifiedImageError
@@ -23,6 +23,14 @@ MAX_REQUESTS = int(os.getenv("CRAWLER_MAX_REQUESTS", "500"))
 MAX_DEPTH = int(os.getenv("CRAWLER_MAX_DEPTH", "5"))
 USERNAME = os.getenv("CRAWLER_USERNAME")
 PASSWORD = os.getenv("CRAWLER_PASSWORD")
+
+# Extensions that are resources, not pages. These should never be queued
+# as Playwright navigations -- doing so is what caused the 403 storm.
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
+TEXT_RESOURCE_EXTENSIONS = {
+    ".js", ".mjs", ".css", ".map", ".json", ".xml", ".svg", ".txt",
+    ".woff", ".woff2", ".ttf", ".eot", ".otf",
+}
 
 
 def allowed(url: str) -> bool:
@@ -39,6 +47,16 @@ def absolute_candidate(value: str, base_url: str) -> str | None:
         return None
     candidate = urljoin(base_url, value.strip())
     return candidate if allowed(candidate) else None
+
+
+def resource_kind(url: str) -> str:
+    """Classify a URL as 'image', 'text_resource', or 'page' based on its path extension."""
+    path = urlparse(url).path.lower().split("?")[0]
+    if any(path.endswith(ext) for ext in IMAGE_EXTENSIONS):
+        return "image"
+    if any(path.endswith(ext) for ext in TEXT_RESOURCE_EXTENSIONS):
+        return "text_resource"
+    return "page"
 
 
 def image_candidates(soup: BeautifulSoup, base_url: str) -> set[str]:
@@ -61,8 +79,10 @@ async def main() -> None:
     found: set[str] = set()
     visited: set[str] = set()
     processed_images: set[str] = set()
+    processed_resources: set[str] = set()
     results: list[dict] = []
     image_results: list[dict] = []
+    resource_results: list[dict] = []
 
     context_options = {}
     if USERNAME is not None and PASSWORD is not None:
@@ -89,12 +109,49 @@ async def main() -> None:
                     response = await client.get(image_url)
                     if response.status_code != 200 or not response.headers.get("content-type", "").startswith("image/"):
                         continue
+                    # Scan response headers too -- flags can live outside the body.
+                    header_text = " ".join(f"{k}: {v}" for k, v in response.headers.items())
+                    found.update(extract_matches(header_text))
+
                     image = Image.open(BytesIO(response.content))
                     ocr_text = pytesseract.image_to_string(image)
                     matches = extract_matches(ocr_text)
                     found.update(matches)
                     image_results.append({"url": image_url, "matches": sorted(matches), "ocr_chars": len(ocr_text)})
                 except (httpx.HTTPError, UnidentifiedImageError, OSError, pytesseract.TesseractError):
+                    continue
+
+    async def scan_text_resources(urls: set[str]) -> None:
+        """Fetch raw text resources (JS/CSS/JSON/etc.) directly and scan their content.
+        Playwright's DOM/content() never exposes the raw text of external files, so this
+        is required to catch flags embedded in scripts, stylesheets, or other assets."""
+        async with httpx.AsyncClient(auth=(USERNAME, PASSWORD) if USERNAME and PASSWORD else None, follow_redirects=True, timeout=20) as client:
+            for res_url in urls - processed_resources:
+                processed_resources.add(res_url)
+                try:
+                    response = await client.get(res_url)
+                    if response.status_code != 200:
+                        continue
+
+                    header_text = " ".join(f"{k}: {v}" for k, v in response.headers.items())
+                    found.update(extract_matches(header_text))
+
+                    body_text = response.text
+                    matches = extract_matches(body_text)
+                    found.update(matches)
+                    resource_results.append({"url": res_url, "matches": sorted(matches), "content_type": response.headers.get("content-type", "")})
+
+                    # CSS files can reference further images (e.g. background-image: url(...))
+                    # that never appear anywhere in the HTML -- chase those too.
+                    if res_url.lower().split("?")[0].endswith(".css"):
+                        nested_images = set()
+                        for raw in CSS_URL_PATTERN.findall(body_text):
+                            candidate = absolute_candidate(raw, res_url)
+                            if candidate and resource_kind(candidate) == "image":
+                                nested_images.add(candidate)
+                        if nested_images:
+                            await scan_images(nested_images)
+                except (httpx.HTTPError, UnicodeDecodeError):
                     continue
 
     @crawler.router.default_handler
@@ -113,6 +170,10 @@ async def main() -> None:
         page_found = extract_matches(url) | extract_matches(html) | extract_matches(text)
         candidates: set[str] = set()
         soup = BeautifulSoup(html, "html.parser")
+
+        # HTML comments are invisible to inner_text() and easy to miss.
+        for comment in soup.find_all(string=lambda t: isinstance(t, Comment)):
+            page_found.update(extract_matches(str(comment)))
 
         for tag in soup.find_all(True):
             for attr, value in tag.attrs.items():
@@ -156,26 +217,56 @@ async def main() -> None:
         await scan_images(images)
         found.update(extract_matches(" ".join(images)))
 
+        # Sort every candidate URL (from attributes/scripts above) into the right bucket
+        # instead of queuing everything as a page navigation.
+        page_candidates: set[str] = set()
+        text_resource_candidates: set[str] = set()
+        for candidate in candidates:
+            kind = resource_kind(candidate)
+            if kind == "image":
+                images.add(candidate)
+            elif kind == "text_resource":
+                text_resource_candidates.add(candidate)
+            else:
+                page_candidates.add(candidate)
+
         try:
             resource_urls = await page.evaluate("performance.getEntriesByType('resource').map(e => e.name)")
             for resource_url in resource_urls:
                 candidate = absolute_candidate(resource_url, url)
-                if candidate:
-                    candidates.add(candidate)
-                if candidate and any(resource_url.lower().split("?")[0].endswith(ext) for ext in (".png", ".jpg", ".jpeg", ".gif", ".webp")):
-                    await scan_images({candidate})
+                if not candidate:
+                    continue
+                kind = resource_kind(candidate)
+                if kind == "image":
+                    images.add(candidate)
+                elif kind == "text_resource":
+                    text_resource_candidates.add(candidate)
+                else:
+                    page_candidates.add(candidate)
         except Exception:
             pass
 
+        await scan_images(images)
+        await scan_text_resources(text_resource_candidates)
+
         found.update(page_found)
-        results.append({"url": url, "title": title, "depth": depth, "matches": sorted(page_found), "links_found": len(candidates), "images_found": len(images)})
+        results.append({"url": url, "title": title, "depth": depth, "matches": sorted(page_found), "links_found": len(page_candidates), "images_found": len(images)})
         if depth < MAX_DEPTH:
-            await context.add_requests([Request.from_url(link, user_data={"depth": depth + 1}) for link in candidates])
+            await context.add_requests([Request.from_url(link, user_data={"depth": depth + 1}) for link in page_candidates])
 
     await crawler.run([Request.from_url(START_URL, user_data={"depth": 0})])
     with open("results.json", "w", encoding="utf-8") as output:
-        json.dump({"matches": sorted(found), "pages": results, "images": image_results}, output, indent=2)
-    print(json.dumps({"matches": sorted(found), "pages_crawled": len(results), "images_processed": len(image_results)}, indent=2))
+        json.dump(
+            {
+                "matches": sorted(found),
+                "pages": results,
+                "images": image_results,
+                "text_resources": resource_results,
+            },
+            output,
+            indent=2,
+        )
+    print(json.dumps({"matches": sorted(found), "pages_crawled": len(results), "images_processed": len(image_results), "text_resources_processed": len(resource_results)}, indent=2))
 
 
 if __name__ == "__main__":
