@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import re
+import zipfile
 from datetime import timedelta
 from io import BytesIO
 from urllib.parse import urljoin, urlparse
@@ -12,6 +13,11 @@ from bs4 import BeautifulSoup, Comment
 from crawlee import Request
 from crawlee.crawlers import PlaywrightCrawler, PlaywrightCrawlingContext
 from PIL import Image, UnidentifiedImageError
+
+try:
+    from pypdf import PdfReader
+except ImportError:
+    PdfReader = None
 
 PATTERN = re.compile(r"VISUALPING\{[0-9a-f]{16}\}")
 URL_PATTERN = re.compile(r"(?:https?://|/)[^\"'\s<>`]+")
@@ -28,9 +34,11 @@ PASSWORD = os.getenv("CRAWLER_PASSWORD")
 # as Playwright navigations -- doing so is what caused the 403 storm.
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
 TEXT_RESOURCE_EXTENSIONS = {
-    ".js", ".mjs", ".css", ".map", ".json", ".xml", ".svg", ".txt",
+    ".js", ".mjs", ".css", ".map", ".json", ".xml", ".svg", ".txt", ".csv",
     ".woff", ".woff2", ".ttf", ".eot", ".otf",
 }
+DOCUMENT_EXTENSIONS = {".pdf"}
+ARCHIVE_EXTENSIONS = {".zip"}
 
 
 def allowed(url: str) -> bool:
@@ -50,10 +58,14 @@ def absolute_candidate(value: str, base_url: str) -> str | None:
 
 
 def resource_kind(url: str) -> str:
-    """Classify a URL as 'image', 'text_resource', or 'page' based on its path extension."""
+    """Classify a URL as 'image', 'text_resource', 'document', 'archive', or 'page' based on its path extension."""
     path = urlparse(url).path.lower().split("?")[0]
     if any(path.endswith(ext) for ext in IMAGE_EXTENSIONS):
         return "image"
+    if any(path.endswith(ext) for ext in DOCUMENT_EXTENSIONS):
+        return "document"
+    if any(path.endswith(ext) for ext in ARCHIVE_EXTENSIONS):
+        return "archive"
     if any(path.endswith(ext) for ext in TEXT_RESOURCE_EXTENSIONS):
         return "text_resource"
     return "page"
@@ -160,6 +172,67 @@ async def main() -> None:
                         if nested_images:
                             await scan_images(nested_images)
                 except (httpx.HTTPError, UnicodeDecodeError):
+                    continue
+
+    async def scan_documents(urls: set[str]) -> None:
+        """PDFs are a classic place to hide flags -- extract text page by page.
+        Falls back to a raw byte-level regex scan if pypdf isn't available or
+        parsing fails, since simple/uncompressed PDF streams often still
+        contain readable ASCII."""
+        async with httpx.AsyncClient(auth=(USERNAME, PASSWORD) if USERNAME and PASSWORD else None, follow_redirects=True, timeout=30) as client:
+            for doc_url in urls - processed_resources:
+                processed_resources.add(doc_url)
+                try:
+                    response = await client.get(doc_url)
+                    if response.status_code != 200:
+                        continue
+                    header_text = " ".join(f"{k}: {v}" for k, v in response.headers.items())
+                    record(extract_matches(header_text), f"document_header:{doc_url}")
+
+                    matches: set[str] = set()
+                    if PdfReader is not None:
+                        try:
+                            reader = PdfReader(BytesIO(response.content))
+                            text_parts = [page.extract_text() or "" for page in reader.pages]
+                            matches |= extract_matches("\n".join(text_parts))
+                            for meta_value in (reader.metadata or {}).values():
+                                matches |= extract_matches(str(meta_value))
+                        except Exception:
+                            pass
+                    if not matches:
+                        # Fallback: raw byte scan for readable ASCII flags.
+                        matches |= extract_matches(response.content.decode("latin-1", errors="ignore"))
+
+                    record(matches, f"document:{doc_url}")
+                    resource_results.append({"url": doc_url, "matches": sorted(matches), "content_type": response.headers.get("content-type", "")})
+                except httpx.HTTPError:
+                    continue
+
+    async def scan_archives(urls: set[str]) -> None:
+        """Zip archives may contain files with flags in their names or contents."""
+        async with httpx.AsyncClient(auth=(USERNAME, PASSWORD) if USERNAME and PASSWORD else None, follow_redirects=True, timeout=30) as client:
+            for archive_url in urls - processed_resources:
+                processed_resources.add(archive_url)
+                try:
+                    response = await client.get(archive_url)
+                    if response.status_code != 200:
+                        continue
+                    matches: set[str] = set()
+                    try:
+                        with zipfile.ZipFile(BytesIO(response.content)) as zf:
+                            for name in zf.namelist():
+                                matches |= extract_matches(name)
+                                try:
+                                    with zf.open(name) as member:
+                                        content = member.read(2_000_000)  # cap per-file read
+                                        matches |= extract_matches(content.decode("utf-8", errors="ignore"))
+                                except Exception:
+                                    continue
+                    except zipfile.BadZipFile:
+                        continue
+                    record(matches, f"archive:{archive_url}")
+                    resource_results.append({"url": archive_url, "matches": sorted(matches), "content_type": "application/zip"})
+                except httpx.HTTPError:
                     continue
 
     @crawler.router.default_handler
@@ -316,12 +389,18 @@ async def main() -> None:
         # instead of queuing everything as a page navigation.
         page_candidates: set[str] = set()
         text_resource_candidates: set[str] = set()
+        document_candidates: set[str] = set()
+        archive_candidates: set[str] = set()
         for candidate in candidates:
             kind = resource_kind(candidate)
             if kind == "image":
                 images.add(candidate)
             elif kind == "text_resource":
                 text_resource_candidates.add(candidate)
+            elif kind == "document":
+                document_candidates.add(candidate)
+            elif kind == "archive":
+                archive_candidates.add(candidate)
             else:
                 page_candidates.add(candidate)
 
@@ -346,6 +425,10 @@ async def main() -> None:
                     images.add(candidate)
                 elif kind == "text_resource":
                     text_resource_candidates.add(candidate)
+                elif kind == "document":
+                    document_candidates.add(candidate)
+                elif kind == "archive":
+                    archive_candidates.add(candidate)
                 else:
                     page_candidates.add(candidate)
         except Exception:
@@ -353,6 +436,19 @@ async def main() -> None:
 
         await scan_images(images)
         await scan_text_resources(text_resource_candidates)
+        await scan_documents(document_candidates)
+        await scan_archives(archive_candidates)
+
+        # Browser storage can carry flags too, if they're set via JS.
+        try:
+            storage_dump = await page.evaluate(
+                "JSON.stringify({local: {...localStorage}, session: {...sessionStorage}})"
+            )
+            storage_matches = extract_matches(storage_dump)
+            record(storage_matches, f"browser_storage:{url}")
+            page_found.update(storage_matches)
+        except Exception:
+            pass
 
         record(page_found, f"page_html_or_text:{url}")
         results.append({"url": url, "title": title, "depth": depth, "matches": sorted(page_found), "links_found": len(page_candidates), "images_found": len(images)})
