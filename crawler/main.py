@@ -77,12 +77,19 @@ def image_candidates(soup: BeautifulSoup, base_url: str) -> set[str]:
 
 async def main() -> None:
     found: set[str] = set()
+    match_sources: dict[str, str] = {}  # flag -> where/how it was discovered
     visited: set[str] = set()
     processed_images: set[str] = set()
     processed_resources: set[str] = set()
     results: list[dict] = []
     image_results: list[dict] = []
     resource_results: list[dict] = []
+
+    def record(matches: set[str], source: str) -> None:
+        for m in matches:
+            if m not in match_sources:
+                match_sources[m] = source
+        found.update(matches)
 
     context_options = {}
     if USERNAME is not None and PASSWORD is not None:
@@ -116,7 +123,7 @@ async def main() -> None:
                     image = Image.open(BytesIO(response.content))
                     ocr_text = pytesseract.image_to_string(image)
                     matches = extract_matches(ocr_text)
-                    found.update(matches)
+                    record(matches, f"image_ocr:{image_url}")
                     image_results.append({"url": image_url, "matches": sorted(matches), "ocr_chars": len(ocr_text)})
                 except (httpx.HTTPError, UnidentifiedImageError, OSError, pytesseract.TesseractError):
                     continue
@@ -138,7 +145,7 @@ async def main() -> None:
 
                     body_text = response.text
                     matches = extract_matches(body_text)
-                    found.update(matches)
+                    record(matches, f"text_resource:{res_url}")
                     resource_results.append({"url": res_url, "matches": sorted(matches), "content_type": response.headers.get("content-type", "")})
 
                     # CSS files can reference further images (e.g. background-image: url(...))
@@ -174,7 +181,9 @@ async def main() -> None:
             main_response = context.response
             if main_response is not None:
                 header_text = " ".join(f"{k}: {v}" for k, v in (await main_response.all_headers()).items())
-                page_found.update(extract_matches(header_text))
+                header_matches = extract_matches(header_text)
+                record(header_matches, f"response_header:{url}")
+                page_found.update(header_matches)
         except Exception:
             pass
 
@@ -182,7 +191,9 @@ async def main() -> None:
         try:
             cookies = await page.context.cookies()
             cookie_text = " ".join(f"{c.get('name')}={c.get('value')}" for c in cookies)
-            page_found.update(extract_matches(cookie_text))
+            cookie_matches = extract_matches(cookie_text)
+            record(cookie_matches, f"cookie:{url}")
+            page_found.update(cookie_matches)
         except Exception:
             pass
         candidates: set[str] = set()
@@ -245,7 +256,7 @@ async def main() -> None:
                     ocr_text = pytesseract.image_to_string(canvas_image)
                     canvas_matches = extract_matches(ocr_text)
                     if canvas_matches:
-                        found.update(canvas_matches)
+                        record(canvas_matches, f"canvas_ocr:{url}#{i}")
                         page_found.update(canvas_matches)
                 except Exception:
                     continue
@@ -275,7 +286,7 @@ async def main() -> None:
                 post_click_text = await page.locator("body").inner_text(timeout=10000)
                 revealed = extract_matches(post_click_html) | extract_matches(post_click_text)
                 if revealed:
-                    found.update(revealed)
+                    record(revealed, f"click_reveal:{url}")
                     page_found.update(revealed)
         except Exception:
             pass
@@ -290,7 +301,7 @@ async def main() -> None:
                 frame_text = await frame.locator("body").inner_text(timeout=5000)
                 frame_matches = extract_matches(frame_html) | extract_matches(frame_text)
                 if frame_matches:
-                    found.update(frame_matches)
+                    record(frame_matches, f"iframe:{frame.url}")
                     page_found.update(frame_matches)
             except Exception:
                 continue
@@ -327,7 +338,7 @@ async def main() -> None:
         await scan_images(images)
         await scan_text_resources(text_resource_candidates)
 
-        found.update(page_found)
+        record(page_found, f"page_html_or_text:{url}")
         results.append({"url": url, "title": title, "depth": depth, "matches": sorted(page_found), "links_found": len(page_candidates), "images_found": len(images)})
         if depth < MAX_DEPTH:
             await context.add_requests([Request.from_url(link, user_data={"depth": depth + 1}) for link in page_candidates])
@@ -337,6 +348,7 @@ async def main() -> None:
         json.dump(
             {
                 "matches": sorted(found),
+                "match_sources": match_sources,
                 "pages": results,
                 "images": image_results,
                 "text_resources": resource_results,
