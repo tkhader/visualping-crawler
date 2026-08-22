@@ -125,10 +125,9 @@ async def main() -> None:
         max_requests_per_crawl=MAX_REQUESTS,
         request_handler_timeout=timedelta(seconds=30),
         max_request_retries=1,
-        browser_new_context_options=context_options
-    ),
-
+        browser_new_context_options=context_options,
     )
+
 
     async def scan_images(urls: set[str]) -> None:
         if not USERNAME or not PASSWORD:
