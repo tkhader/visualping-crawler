@@ -125,7 +125,6 @@ async def main() -> None:
         max_requests_per_crawl=MAX_REQUESTS,
         request_handler_timeout=timedelta(seconds=30),
         max_request_retries=1,
-        browser_launch_options=browser_launch_options,
         browser_new_context_options=context_options
     ),
 
