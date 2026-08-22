@@ -1,0 +1,18 @@
+{
+  "unique_key": "http://54.214.7.161/wiki?hl=en",
+  "url": "http://54.214.7.161/wiki/?hl=en",
+  "method": "GET",
+  "payload": null,
+  "headers": {},
+  "user_data": {
+    "__crawlee": {
+      "state": 4,
+      "crawlDepth": 2
+    },
+    "depth": 2
+  },
+  "retry_count": 0,
+  "no_retry": false,
+  "loaded_url": "http://54.214.7.161/wiki/?hl=en",
+  "handled_at": "2026-08-22 01:01:28.314884+00:00"
+}

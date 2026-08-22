@@ -1,0 +1,18 @@
+{
+  "unique_key": "http://54.214.7.161/wiki/embed-search",
+  "url": "http://54.214.7.161/wiki/embed-search",
+  "method": "GET",
+  "payload": null,
+  "headers": {},
+  "user_data": {
+    "__crawlee": {
+      "state": 4,
+      "crawlDepth": 6
+    },
+    "depth": 6
+  },
+  "retry_count": 0,
+  "no_retry": false,
+  "loaded_url": "http://54.214.7.161/wiki/embed-search/",
+  "handled_at": "2026-08-22 01:03:53.033110+00:00"
+}

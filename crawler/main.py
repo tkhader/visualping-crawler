@@ -9,7 +9,7 @@ from urllib.parse import urljoin, urlparse
 import httpx
 import pytesseract
 from bs4 import BeautifulSoup
-from crawlee import Request
+from crawlee import Request, ConcurrencySettings
 from crawlee.crawlers import PlaywrightCrawler, PlaywrightCrawlingContext
 from PIL import Image, UnidentifiedImageError
 
@@ -20,11 +20,11 @@ EXAMPLE_MARKER = "VISUALPING{0000deadbeef0000}"
 START_URL = os.getenv("CRAWLER_START_URL", "http://54.214.7.161/")
 ALLOWED_HOST = os.getenv("CRAWLER_ALLOWED_HOST", urlparse(START_URL).hostname or "")
 MAX_REQUESTS = int(os.getenv("CRAWLER_MAX_REQUESTS", "500"))
-MAX_DEPTH = int(os.getenv("CRAWLER_MAX_DEPTH", "5"))
+MAX_DEPTH = int(os.getenv("CRAWLER_MAX_DEPTH", "100"))
 USERNAME = os.getenv("CRAWLER_USERNAME")
 PASSWORD = os.getenv("CRAWLER_PASSWORD")
 TOR_PROXY = os.getenv("CRAWLER_TOR_PROXY")
-
+MAX_CONCURRENCY = int(os.getenv("CRAWLER_MAX_CONCURRENCY", "8"))
 
 def allowed(url: str) -> bool:
     parsed = urlparse(url)
@@ -72,14 +72,22 @@ async def main() -> None:
             "password": PASSWORD,
             "send": "always",
         }
+    browser_launch_options = {}
     if TOR_PROXY:
-        context_options["proxy"] = {"server": TOR_PROXY}
+        browser_launch_options["proxy"] = {"server": TOR_PROXY}
 
     crawler = PlaywrightCrawler(
         max_requests_per_crawl=MAX_REQUESTS,
         request_handler_timeout=timedelta(seconds=30),
         max_request_retries=1,
+        browser_launch_options=browser_launch_options,
         browser_new_context_options=context_options,
+
+        concurrency_settings=ConcurrencySettings(
+        max_concurrency=8,
+        desired_concurrency=3,
+    ),
+
     )
 
     async def scan_images(urls: set[str]) -> None:

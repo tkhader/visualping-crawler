@@ -1,0 +1,18 @@
+{
+  "unique_key": "http://54.214.7.161/notes/queue-fragment",
+  "url": "http://54.214.7.161/notes/queue-fragment/",
+  "method": "GET",
+  "payload": null,
+  "headers": {},
+  "user_data": {
+    "__crawlee": {
+      "state": 4,
+      "crawlDepth": 4
+    },
+    "depth": 4
+  },
+  "retry_count": 0,
+  "no_retry": false,
+  "loaded_url": "http://54.214.7.161/notes/queue-fragment/",
+  "handled_at": "2026-08-22 01:02:31.627450+00:00"
+}
