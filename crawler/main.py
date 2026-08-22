@@ -26,7 +26,7 @@ EXAMPLE_MARKER = "VISUALPING{0000deadbeef0000}"
 START_URL = os.getenv("CRAWLER_START_URL", "http://54.214.7.161/")
 ALLOWED_HOST = os.getenv("CRAWLER_ALLOWED_HOST", urlparse(START_URL).hostname or "")
 MAX_REQUESTS = int(os.getenv("CRAWLER_MAX_REQUESTS", "500"))
-MAX_DEPTH = int(os.getenv("CRAWLER_MAX_DEPTH", "100"))
+MAX_DEPTH = int(os.getenv("CRAWLER_MAX_DEPTH", "5"))
 USERNAME = os.getenv("CRAWLER_USERNAME")
 PASSWORD = os.getenv("CRAWLER_PASSWORD")
 
@@ -105,7 +105,7 @@ async def main() -> None:
     results: list[dict] = []
     image_results: list[dict] = []
     resource_results: list[dict] = []
-    debug_counts = {"canvas_seen": 0, "reveal_clicks": 0, "iframes_seen": 0, "pages_with_canvas": 0, "pages_with_iframe": 0}
+    debug_counts = {"canvas_seen": 0, "reveal_clicks": 0, "iframes_seen": 0, "pages_with_canvas": 0, "pages_with_iframe": 0, "selects_seen": 0, "checkboxes_radios_seen": 0}
 
     def record(matches: set[str], source: str) -> None:
         for m in matches:
@@ -393,6 +393,73 @@ async def main() -> None:
                 if revealed:
                     record(revealed, f"click_reveal:{url}")
                     page_found.update(revealed)
+        except Exception:
+            pass
+
+        # Form controls (dropdowns, checkboxes, radio buttons) can filter/reveal
+        # content that's never in the initial DOM -- pages literally named
+        # "filter-gateway" are a strong hint this matters. Exercise every
+        # <select> option and every checkbox/radio, re-scanning after each.
+        try:
+            select_locators = page.locator("select")
+            select_count = await select_locators.count()
+            debug_counts["selects_seen"] += select_count
+            for i in range(min(select_count, 10)):
+                try:
+                    select_el = select_locators.nth(i)
+                    option_values = await select_el.locator("option").evaluate_all(
+                        "opts => opts.map(o => o.value).filter(v => v !== '')"
+                    )
+                    for value in option_values[:15]:  # cap options per dropdown
+                        try:
+                            await select_el.select_option(value=value, timeout=2000)
+                            await page.wait_for_timeout(200)
+                            post_select_html = await page.content()
+                            post_select_text = await page.locator("body").inner_text(timeout=5000)
+                            revealed = extract_matches(post_select_html) | extract_matches(post_select_text)
+                            if revealed:
+                                record(revealed, f"filter_select:{url}#option={value}")
+                                page_found.update(revealed)
+                        except Exception:
+                            continue
+                except Exception:
+                    continue
+
+            checkbox_radio = page.locator("input[type='checkbox'], input[type='radio']")
+            cr_count = await checkbox_radio.count()
+            debug_counts["checkboxes_radios_seen"] += cr_count
+            for i in range(min(cr_count, 20)):
+                try:
+                    el = checkbox_radio.nth(i)
+                    if await el.is_visible():
+                        await el.check(timeout=2000, force=True)
+                        await page.wait_for_timeout(200)
+                        post_check_html = await page.content()
+                        post_check_text = await page.locator("body").inner_text(timeout=5000)
+                        revealed = extract_matches(post_check_html) | extract_matches(post_check_text)
+                        if revealed:
+                            record(revealed, f"filter_checkbox:{url}#{i}")
+                            page_found.update(revealed)
+                except Exception:
+                    continue
+
+            # If there's a submit button, also try submitting after the last
+            # selections/checks above (some filter UIs require explicit submit
+            # rather than reacting live to onChange).
+            if select_count or cr_count:
+                submit_btn = page.locator("button[type='submit'], input[type='submit']")
+                if await submit_btn.count():
+                    try:
+                        await submit_btn.first.click(timeout=2000, force=True)
+                        await page.wait_for_timeout(300)
+                        post_submit_html = await page.content()
+                        post_submit_text = await page.locator("body").inner_text(timeout=5000)
+                        revealed = extract_matches(post_submit_html) | extract_matches(post_submit_text)
+                        if revealed:
+                            record(revealed, f"filter_submit:{url}")
+                            page_found.update(revealed)
+                    except Exception:
+                        pass
         except Exception:
             pass
 
