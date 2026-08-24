@@ -105,7 +105,7 @@ async def main() -> None:
     results: list[dict] = []
     image_results: list[dict] = []
     resource_results: list[dict] = []
-    debug_counts = {"canvas_seen": 0, "reveal_clicks": 0, "iframes_seen": 0, "pages_with_canvas": 0, "pages_with_iframe": 0, "selects_seen": 0, "checkboxes_radios_seen": 0}
+    debug_counts = {"canvas_seen": 0, "reveal_clicks": 0, "iframes_seen": 0, "pages_with_canvas": 0, "pages_with_iframe": 0, "selects_seen": 0, "checkboxes_radios_seen": 0, "header_checks_ok": 0, "header_checks_response_none": 0, "header_checks_failed": 0, "text_inputs_seen": 0}
 
     def record(matches: set[str], source: str) -> None:
         for m in matches:
@@ -285,8 +285,11 @@ async def main() -> None:
                 header_matches = extract_matches(header_text)
                 record(header_matches, f"response_header:{url}")
                 page_found.update(header_matches)
+                debug_counts["header_checks_ok"] += 1
+            else:
+                debug_counts["header_checks_response_none"] += 1
         except Exception:
-            pass
+            debug_counts["header_checks_failed"] += 1
 
         # Cookies can carry flags too.
         try:
@@ -428,6 +431,9 @@ async def main() -> None:
             checkbox_radio = page.locator("input[type='checkbox'], input[type='radio']")
             cr_count = await checkbox_radio.count()
             debug_counts["checkboxes_radios_seen"] += cr_count
+
+            text_inputs = page.locator("input[type='text'], input[type='search'], input:not([type])")
+            debug_counts["text_inputs_seen"] += await text_inputs.count()
             for i in range(min(cr_count, 20)):
                 try:
                     el = checkbox_radio.nth(i)
@@ -560,13 +566,19 @@ async def main() -> None:
     if USERNAME and PASSWORD:
         try:
             async with httpx.AsyncClient(auth=(USERNAME, PASSWORD), follow_redirects=True, timeout=20) as client:
-                for well_known_path in ("/robots.txt", "/sitemap.xml"):
+                for well_known_path in (
+                    "/robots.txt", "/sitemap.xml", "/favicon.ico", "/manifest.json",
+                    "/humans.txt", "/security.txt", "/.well-known/security.txt",
+                    "/.well-known/change-password", "/crossdomain.xml", "/.env",
+                    "/version.json", "/status.json", "/health", "/api/status",
+                ):
                     try:
                         well_known_url = urljoin(START_URL, well_known_path)
                         response = await client.get(well_known_url)
                         if response.status_code == 200:
                             record(extract_matches(response.text), f"well_known:{well_known_url}")
-                    except httpx.HTTPError:
+                            print(f"well-known hit: {well_known_url} -> 200 ({len(response.content)} bytes)")
+                    except (httpx.HTTPError, UnicodeDecodeError):
                         continue
         except Exception:
             pass
