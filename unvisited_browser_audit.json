@@ -1,0 +1,16 @@
+{
+  "urls_probed": 135,
+  "pages_rendered": 135,
+  "same_host_responses": 525,
+  "hits": {
+    "network:GET:http://54.214.7.161/products/filter-gateway/": [
+      "VISUALPING{64d26185a2f94e34}"
+    ],
+    "network:GET:http://54.214.7.161/products/filter-gateway/?utm_source=internal": [
+      "VISUALPING{64d26185a2f94e34}"
+    ]
+  },
+  "new_markers": [
+    "VISUALPING{64d26185a2f94e34}"
+  ]
+}
