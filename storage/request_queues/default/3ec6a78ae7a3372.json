@@ -1,6 +1,6 @@
 {
   "unique_key": "http://54.214.7.161/help/anomaly-selector-handshake",
-  "url": "http://54.214.7.161/help/anomaly-selector-handshake/?utm_source=sidebar",
+  "url": "http://54.214.7.161/help/anomaly-selector-handshake/?utm_source=internal",
   "method": "GET",
   "payload": null,
   "headers": {},
@@ -13,6 +13,6 @@
   },
   "retry_count": 0,
   "no_retry": false,
-  "loaded_url": "http://54.214.7.161/help/anomaly-selector-handshake/?utm_source=sidebar",
-  "handled_at": "2026-08-24 06:28:27.057264+00:00"
+  "loaded_url": "http://54.214.7.161/help/anomaly-selector-handshake/?utm_source=internal",
+  "handled_at": "2026-08-25 07:15:51.918258+00:00"
 }

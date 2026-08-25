@@ -1,6 +1,6 @@
 {
   "unique_key": "http://54.214.7.161/blog/resolver-pixel",
-  "url": "http://54.214.7.161/blog/resolver-pixel/?utm_source=sidebar",
+  "url": "http://54.214.7.161/blog/resolver-pixel/",
   "method": "GET",
   "payload": null,
   "headers": {},
@@ -13,6 +13,6 @@
   },
   "retry_count": 0,
   "no_retry": false,
-  "loaded_url": "http://54.214.7.161/blog/resolver-pixel/?utm_source=sidebar",
-  "handled_at": "2026-08-24 06:29:31.276524+00:00"
+  "loaded_url": "http://54.214.7.161/blog/resolver-pixel/",
+  "handled_at": "2026-08-25 07:16:59.459941+00:00"
 }

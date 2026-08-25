@@ -1,6 +1,6 @@
 {
   "unique_key": "http://54.214.7.161/wiki/embed-search",
-  "url": "http://54.214.7.161/wiki/embed-search/",
+  "url": "http://54.214.7.161/wiki/embed-search",
   "method": "GET",
   "payload": null,
   "headers": {},
@@ -14,5 +14,5 @@
   "retry_count": 0,
   "no_retry": false,
   "loaded_url": "http://54.214.7.161/wiki/embed-search/",
-  "handled_at": "2026-08-24 06:29:45.305630+00:00"
+  "handled_at": "2026-08-25 07:16:47.421050+00:00"
 }
