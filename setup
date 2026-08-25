@@ -2,13 +2,14 @@
 export CRAWLER_USERNAME="tanzil.khader"
 export CRAWLER_PASSWORD="05b00ab58de4873c754c"
 
-sudo service tor restart
+mkdir -p storage/tor
+brew services stop tor >/dev/null 2>&1 || true
+tor -f "$PWD/torrc" >/tmp/visualping-tor.log 2>&1 &
 sleep 3  # give Tor a moment to fully come up before anything tries the control port
-sudo chmod 644 /run/tor/control.authcookie 2>/dev/null || true
 
 export CRAWLER_TOR_PROXY="socks5://127.0.0.1:9050"
 export CRAWLER_MAX_CONCURRENCY=8
 export CRAWLER_MAX_DEPTH=6
 export CRAWLER_MAX_REQUESTS=1000
 
-python -m crawler.main
+python3 -m crawler.main

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import asyncio
 import json
 import os
@@ -20,6 +22,7 @@ except ImportError:
     PdfReader = None
 
 PATTERN = re.compile(r"VISUALPING\{[0-9a-f]{16}\}")
+OCR_PATTERN = re.compile(r"VISUALPING\{([0-9a-z/]{16})\}", re.IGNORECASE)
 URL_PATTERN = re.compile(r"(?:https?://|/)[^\"'\s<>`]+")
 CSS_URL_PATTERN = re.compile(r"url\(\s*[\"']?([^\"')]+)")
 EXAMPLE_MARKER = "VISUALPING{0000deadbeef0000}"
@@ -55,8 +58,26 @@ def allowed(url: str) -> bool:
     return parsed.scheme in {"http", "https"} and parsed.hostname == ALLOWED_HOST
 
 
-def extract_matches(value: str) -> set[str]:
+def extract_matches(value: object) -> set[str]:
+    if isinstance(value, bytes):
+        decoded_values = [value.decode("utf-8", errors="ignore")]
+        for encoding in ("utf-16le", "utf-16be"):
+            decoded_values.append(value.decode(encoding, errors="ignore"))
+        value = " ".join(decoded_values)
+    elif not isinstance(value, str):
+        value = str(value)
     return {match for match in PATTERN.findall(value or "") if match != EXAMPLE_MARKER}
+
+
+def extract_ocr_matches(value: str) -> set[str]:
+    corrections = str.maketrans({"o": "0", "i": "1", "l": "1", "/": "1"})
+    matches = set()
+    for candidate in OCR_PATTERN.findall(value or ""):
+        normalized = candidate.lower().translate(corrections)
+        marker = f"VISUALPING{{{normalized}}}"
+        if PATTERN.fullmatch(marker) and marker != EXAMPLE_MARKER:
+            matches.add(marker)
+    return matches
 
 
 def absolute_candidate(value: str, base_url: str) -> str | None:
@@ -159,8 +180,8 @@ async def main() -> None:
                     record(extract_matches(header_text), f"image_header:{image_url}")
 
                     image = Image.open(BytesIO(response.content))
-                    ocr_text = pytesseract.image_to_string(image)
-                    matches = extract_matches(ocr_text)
+                    ocr_text = pytesseract.image_to_string(image, config="--psm 13")
+                    matches = extract_ocr_matches(ocr_text)
                     record(matches, f"image_ocr:{image_url}")
 
                     # EXIF metadata is a separate hiding spot from pixel content --
@@ -173,7 +194,7 @@ async def main() -> None:
                         # Also check common textual EXIF fields (Comment, ImageDescription, etc.)
                         # via PIL's info dict, which sometimes carries data getexif() misses.
                         for value in image.info.values():
-                            exif_matches |= extract_matches(str(value))
+                            exif_matches |= extract_matches(value)
                     except Exception:
                         pass
                     if exif_matches:

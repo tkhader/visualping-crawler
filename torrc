@@ -1,0 +1,7 @@
+# German exit nodes are required for /status/eu-region/.
+SocksPort 9050
+ControlPort 9051
+CookieAuthentication 1
+ExitNodes {de}
+StrictNodes 1
+DataDirectory ./storage/tor
