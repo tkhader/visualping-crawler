@@ -102,6 +102,7 @@ async def main() -> None:
     visited: set[str] = set()
     processed_images: set[str] = set()
     processed_resources: set[str] = set()
+    blocked_urls: dict[str, str] = {}  # url -> kind ("image"/"text"/"document"), for Tor retry
     results: list[dict] = []
     image_results: list[dict] = []
     resource_results: list[dict] = []
@@ -120,6 +121,11 @@ async def main() -> None:
             "password": PASSWORD,
             "send": "always",
         }
+    # The one confirmed geofenced page is region-gated; test whether content
+    # elsewhere is also gated by *language* preference rather than IP, by
+    # requesting German content on every page throughout the whole crawl.
+    context_options["extra_http_headers"] = {"Accept-Language": "de-DE,de;q=0.9,en;q=0.5"}
+    context_options["locale"] = "de-DE"
 
     crawler = PlaywrightCrawler(
         max_requests_per_crawl=MAX_REQUESTS,
@@ -128,14 +134,18 @@ async def main() -> None:
         browser_new_context_options=context_options,
     )
 
-    async def scan_images(urls: set[str]) -> None:
+    async def scan_images(urls: set[str], client_override: httpx.AsyncClient | None = None) -> None:
         if not USERNAME or not PASSWORD:
             return
-        async with httpx.AsyncClient(auth=(USERNAME, PASSWORD), follow_redirects=True, timeout=20) as client:
+
+        async def _do_scan(client: httpx.AsyncClient) -> None:
             for image_url in urls - processed_images:
                 processed_images.add(image_url)
                 try:
                     response = await client.get(image_url)
+                    if response.status_code == 403:
+                        blocked_urls[image_url] = "image"
+                        continue
                     if response.status_code != 200 or not response.headers.get("content-type", "").startswith("image/"):
                         continue
                     # Scan response headers too -- flags can live outside the body.
@@ -146,19 +156,47 @@ async def main() -> None:
                     ocr_text = pytesseract.image_to_string(image)
                     matches = extract_matches(ocr_text)
                     record(matches, f"image_ocr:{image_url}")
+
+                    # EXIF metadata is a separate hiding spot from pixel content --
+                    # OCR never sees it since it's not rendered in the image.
+                    exif_matches: set[str] = set()
+                    try:
+                        exif_data = image.getexif()
+                        for tag_id, value in exif_data.items():
+                            exif_matches |= extract_matches(str(value))
+                        # Also check common textual EXIF fields (Comment, ImageDescription, etc.)
+                        # via PIL's info dict, which sometimes carries data getexif() misses.
+                        for value in image.info.values():
+                            exif_matches |= extract_matches(str(value))
+                    except Exception:
+                        pass
+                    if exif_matches:
+                        record(exif_matches, f"image_exif:{image_url}")
+                        matches |= exif_matches
+
                     image_results.append({"url": image_url, "matches": sorted(matches), "ocr_chars": len(ocr_text)})
                 except (httpx.HTTPError, UnidentifiedImageError, OSError, pytesseract.TesseractError):
                     continue
 
-    async def scan_text_resources(urls: set[str]) -> None:
+        if client_override is not None:
+            await _do_scan(client_override)
+        else:
+            async with httpx.AsyncClient(auth=(USERNAME, PASSWORD), follow_redirects=True, timeout=20) as client:
+                await _do_scan(client)
+
+    async def scan_text_resources(urls: set[str], client_override: httpx.AsyncClient | None = None) -> None:
         """Fetch raw text resources (JS/CSS/JSON/etc.) directly and scan their content.
         Playwright's DOM/content() never exposes the raw text of external files, so this
         is required to catch flags embedded in scripts, stylesheets, or other assets."""
-        async with httpx.AsyncClient(auth=(USERNAME, PASSWORD) if USERNAME and PASSWORD else None, follow_redirects=True, timeout=20) as client:
+
+        async def _do_scan(client: httpx.AsyncClient) -> None:
             for res_url in urls - processed_resources:
                 processed_resources.add(res_url)
                 try:
                     response = await client.get(res_url)
+                    if response.status_code == 403:
+                        blocked_urls[res_url] = "text"
+                        continue
                     if response.status_code != 200:
                         continue
 
@@ -179,9 +217,15 @@ async def main() -> None:
                             if candidate and resource_kind(candidate) == "image":
                                 nested_images.add(candidate)
                         if nested_images:
-                            await scan_images(nested_images)
+                            await scan_images(nested_images, client_override=client_override)
                 except (httpx.HTTPError, UnicodeDecodeError):
                     continue
+
+        if client_override is not None:
+            await _do_scan(client_override)
+        else:
+            async with httpx.AsyncClient(auth=(USERNAME, PASSWORD) if USERNAME and PASSWORD else None, follow_redirects=True, timeout=20) as client:
+                await _do_scan(client)
 
     async def scan_documents(urls: set[str]) -> None:
         """PDFs are a classic place to hide flags -- extract text page by page.
@@ -636,6 +680,52 @@ async def main() -> None:
 
             if not success:
                 geofenced_results.append({"url": geofenced_url, "status_code": None, "matches": [], "attempts": attempts})
+            elif success:
+                # The geofenced page was only ever scanned as raw text -- it was
+                # never rendered/parsed, so any images/scripts it references were
+                # never discovered. If those assets are ALSO geofenced, a plain
+                # (non-Tor) fetch would 403 anyway, so fetch them through Tor too.
+                try:
+                    geo_soup = BeautifulSoup(response.text, "html.parser")
+                    geo_images = image_candidates(geo_soup, geofenced_url)
+                    geo_text_candidates: set[str] = set()
+                    for tag in geo_soup.find_all(True):
+                        for attr, value in tag.attrs.items():
+                            values = value if isinstance(value, list) else [value]
+                            for item in values:
+                                if not isinstance(item, str):
+                                    continue
+                                for raw in URL_PATTERN.findall(item):
+                                    candidate = absolute_candidate(raw, geofenced_url)
+                                    if candidate and resource_kind(candidate) == "text_resource":
+                                        geo_text_candidates.add(candidate)
+                    if geo_images or geo_text_candidates:
+                        async with httpx.AsyncClient(auth=(USERNAME, PASSWORD), proxy=TOR_PROXY, timeout=30) as tor_client:
+                            if geo_images:
+                                await scan_images(geo_images, client_override=tor_client)
+                            if geo_text_candidates:
+                                await scan_text_resources(geo_text_candidates, client_override=tor_client)
+                except Exception:
+                    pass
+
+    # Any asset (image/JS/CSS/etc.) that 403'd during the normal crawl might be
+    # geofenced too, not just the one known page -- retry every one of them
+    # through Tor now that we know the mechanism exists on this site.
+    retried_blocked: list[dict] = []
+    if USERNAME and PASSWORD and blocked_urls:
+        async with httpx.AsyncClient(auth=(USERNAME, PASSWORD), proxy=TOR_PROXY, timeout=30) as tor_client:
+            image_retries = {u for u, kind in blocked_urls.items() if kind == "image"}
+            text_retries = {u for u, kind in blocked_urls.items() if kind == "text"}
+            # Clear processed-sets for these so the retry actually re-fetches them.
+            processed_images.difference_update(image_retries)
+            processed_resources.difference_update(text_retries)
+            before = len(found)
+            if image_retries:
+                await scan_images(image_retries, client_override=tor_client)
+            if text_retries:
+                await scan_text_resources(text_retries, client_override=tor_client)
+            retried_blocked = [{"url": u, "kind": blocked_urls[u]} for u in blocked_urls]
+            print(f"Retried {len(blocked_urls)} previously-403'd assets through Tor; new flags found: {len(found) - before}")
 
     with open("results.json", "w", encoding="utf-8") as output:
         json.dump(
@@ -646,11 +736,12 @@ async def main() -> None:
                 "images": image_results,
                 "text_resources": resource_results,
                 "geofenced_pages": geofenced_results,
+                "retried_blocked_assets": retried_blocked,
             },
             output,
             indent=2,
         )
-    print(json.dumps({"matches": sorted(found), "pages_crawled": len(results), "images_processed": len(image_results), "text_resources_processed": len(resource_results), "geofenced_pages": geofenced_results, "debug_counts": debug_counts}, indent=2))
+    print(json.dumps({"matches": sorted(found), "pages_crawled": len(results), "images_processed": len(image_results), "text_resources_processed": len(resource_results), "geofenced_pages": geofenced_results, "blocked_assets_found": len(blocked_urls), "debug_counts": debug_counts}, indent=2))
 
 
 if __name__ == "__main__":
