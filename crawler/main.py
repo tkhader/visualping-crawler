@@ -5,9 +5,11 @@ import json
 import os
 import re
 import zipfile
+import base64
+import html
 from datetime import timedelta
 from io import BytesIO
-from urllib.parse import urljoin, urlparse
+from urllib.parse import unquote, urljoin, urlparse
 
 import httpx
 import pytesseract
@@ -28,8 +30,8 @@ CSS_URL_PATTERN = re.compile(r"url\(\s*[\"']?([^\"')]+)")
 EXAMPLE_MARKER = "VISUALPING{0000deadbeef0000}"
 START_URL = os.getenv("CRAWLER_START_URL", "http://54.214.7.161/")
 ALLOWED_HOST = os.getenv("CRAWLER_ALLOWED_HOST", urlparse(START_URL).hostname or "")
-MAX_REQUESTS = int(os.getenv("CRAWLER_MAX_REQUESTS", "500"))
-MAX_DEPTH = int(os.getenv("CRAWLER_MAX_DEPTH", "5"))
+MAX_REQUESTS = int(os.getenv("CRAWLER_MAX_REQUESTS", "5000"))
+MAX_DEPTH = int(os.getenv("CRAWLER_MAX_DEPTH", "10"))
 USERNAME = os.getenv("CRAWLER_USERNAME")
 PASSWORD = os.getenv("CRAWLER_PASSWORD")
 
@@ -66,7 +68,18 @@ def extract_matches(value: object) -> set[str]:
         value = " ".join(decoded_values)
     elif not isinstance(value, str):
         value = str(value)
-    return {match for match in PATTERN.findall(value or "") if match != EXAMPLE_MARKER}
+    candidates = [value, html.unescape(unquote(value))]
+    for encoded in re.findall(r"(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{24,}={0,2}(?![A-Za-z0-9+/])", value):
+        try:
+            candidates.append(base64.b64decode(encoded, validate=True).decode("utf-8", errors="ignore"))
+        except (ValueError, UnicodeDecodeError):
+            continue
+    return {
+        match
+        for candidate in candidates
+        for match in PATTERN.findall(candidate or "")
+        if match != EXAMPLE_MARKER
+    }
 
 
 def extract_ocr_matches(value: str) -> set[str]:
@@ -121,13 +134,17 @@ async def main() -> None:
     found: set[str] = set()
     match_sources: dict[str, str] = {}  # flag -> where/how it was discovered
     visited: set[str] = set()
+    discovered_page_urls: set[str] = {START_URL}
+    queued_page_urls: set[str] = {START_URL}
+    depth_limited_page_urls: set[str] = set()
     processed_images: set[str] = set()
     processed_resources: set[str] = set()
     blocked_urls: dict[str, str] = {}  # url -> kind ("image"/"text"/"document"), for Tor retry
     results: list[dict] = []
     image_results: list[dict] = []
     resource_results: list[dict] = []
-    debug_counts = {"canvas_seen": 0, "reveal_clicks": 0, "iframes_seen": 0, "pages_with_canvas": 0, "pages_with_iframe": 0, "selects_seen": 0, "checkboxes_radios_seen": 0, "header_checks_ok": 0, "header_checks_response_none": 0, "header_checks_failed": 0, "text_inputs_seen": 0, "websockets_seen": 0}
+    debug_counts = {"canvas_seen": 0, "reveal_clicks": 0, "iframes_seen": 0, "pages_with_canvas": 0, "pages_with_iframe": 0, "selects_seen": 0, "checkboxes_radios_seen": 0, "header_checks_ok": 0, "header_checks_response_none": 0, "header_checks_failed": 0, "text_inputs_seen": 0, "websockets_seen": 0, "network_responses_seen": 0, "network_response_matches": 0}
+    network_tasks: set[asyncio.Task] = set()
 
     def record(matches: set[str], source: str) -> None:
         for m in matches:
@@ -190,7 +207,7 @@ async def main() -> None:
                     try:
                         exif_data = image.getexif()
                         for tag_id, value in exif_data.items():
-                            exif_matches |= extract_matches(str(value))
+                            exif_matches |= extract_matches(value)
                         # Also check common textual EXIF fields (Comment, ImageDescription, etc.)
                         # via PIL's info dict, which sometimes carries data getexif() misses.
                         for value in image.info.values():
@@ -353,6 +370,30 @@ async def main() -> None:
             ws.on("framesent", on_frame)
 
         page.on("websocket", handle_ws)
+
+        async def scan_network_response(response) -> None:
+            if not allowed(response.url):
+                return
+            debug_counts["network_responses_seen"] += 1
+            try:
+                headers = await response.all_headers()
+                request = response.request
+                request_data = request.post_data or ""
+                header_text = " ".join(f"{k}: {v}" for k, v in headers.items())
+                matches = extract_matches(header_text) | extract_matches(request_data)
+                content_type = headers.get("content-type", "").lower()
+                if any(kind in content_type for kind in ("text/", "json", "javascript", "xml", "svg")):
+                    matches |= extract_matches(await response.body())
+                if matches:
+                    debug_counts["network_response_matches"] += len(matches)
+                    record(matches, f"network:{request.method}:{response.url}")
+            except Exception:
+                pass
+
+        def schedule_network_response(response) -> None:
+            network_tasks.add(asyncio.create_task(scan_network_response(response)))
+
+        page.on("response", schedule_network_response)
 
     @crawler.router.default_handler
     async def handle(context: PlaywrightCrawlingContext) -> None:
@@ -595,6 +636,7 @@ async def main() -> None:
                 archive_candidates.add(candidate)
             else:
                 page_candidates.add(candidate)
+                discovered_page_urls.add(candidate)
 
         try:
             resource_entries = await page.evaluate(
@@ -648,10 +690,68 @@ async def main() -> None:
         except Exception:
             pass
 
+        # Check browser-managed state and rendered CSS that are absent from raw HTML.
+        try:
+            browser_state = await page.evaluate("""async () => {
+                const values = [];
+                values.push(location.href, location.hash, document.cookie);
+                for (const element of document.querySelectorAll('*')) {
+                    const style = getComputedStyle(element);
+                    values.push(style.content, style.backgroundImage);
+                    values.push(getComputedStyle(element, '::before').content);
+                    values.push(getComputedStyle(element, '::after').content);
+                    if (element.shadowRoot) values.push(element.shadowRoot.textContent || '');
+                }
+                if (window.indexedDB && indexedDB.databases) {
+                    for (const database of await indexedDB.databases()) {
+                        values.push(JSON.stringify(database));
+                        if (!database.name) continue;
+                        const connection = await new Promise((resolve, reject) => {
+                            const request = indexedDB.open(database.name);
+                            request.onsuccess = () => resolve(request.result);
+                            request.onerror = () => reject(request.error);
+                        });
+                        for (const storeName of connection.objectStoreNames) {
+                            const transaction = connection.transaction(storeName, 'readonly');
+                            const records = await new Promise((resolve, reject) => {
+                                const request = transaction.objectStore(storeName).getAll();
+                                request.onsuccess = () => resolve(request.result);
+                                request.onerror = () => reject(request.error);
+                            });
+                            values.push(JSON.stringify(records));
+                        }
+                        connection.close();
+                    }
+                }
+                if (window.caches) {
+                    for (const cacheName of await caches.keys()) {
+                        const cache = await caches.open(cacheName);
+                        for (const request of await cache.keys()) {
+                            const response = await cache.match(request);
+                            values.push(request.url, ...(response ? [await response.text()] : []));
+                        }
+                    }
+                }
+                if (navigator.serviceWorker) {
+                    for (const registration of await navigator.serviceWorker.getRegistrations()) {
+                        values.push(registration.scope, registration.active?.scriptURL || '');
+                    }
+                }
+                return values.join(' ');
+            }""")
+            browser_matches = extract_matches(browser_state)
+            record(browser_matches, f"browser_state:{url}")
+            page_found.update(browser_matches)
+        except Exception:
+            pass
+
         record(page_found, f"page_html_or_text:{url}")
         results.append({"url": url, "title": title, "depth": depth, "matches": sorted(page_found), "links_found": len(page_candidates), "images_found": len(images)})
         if depth < MAX_DEPTH:
+            queued_page_urls.update(page_candidates)
             await context.add_requests([Request.from_url(link, user_data={"depth": depth + 1}) for link in page_candidates])
+        else:
+            depth_limited_page_urls.update(page_candidates)
 
     # robots.txt / sitemap.xml are things "the server gives you" without any
     # clicking at all -- cheap to check once up front.
@@ -676,6 +776,8 @@ async def main() -> None:
             pass
 
     await crawler.run([Request.from_url(START_URL, user_data={"depth": 0})])
+    if network_tasks:
+        await asyncio.gather(*network_tasks, return_exceptions=True)
 
     # Retry known geofenced pages through Tor (or another configured proxy)
     # exited in the required region, since a normal browser/httpx request
@@ -775,6 +877,15 @@ async def main() -> None:
             print(f"Retried {len(blocked_urls)} previously-403'd assets through Tor; new flags found: {len(found) - before}")
 
     with open("results.json", "w", encoding="utf-8") as output:
+        crawl_audit = {
+            "discovered_page_urls": len(discovered_page_urls),
+            "queued_page_urls": len(queued_page_urls),
+            "visited_page_urls": len(visited),
+            "discovered_but_unvisited": sorted(discovered_page_urls - visited),
+            "depth_limited_page_urls": sorted(depth_limited_page_urls),
+            "max_depth": MAX_DEPTH,
+            "max_requests": MAX_REQUESTS,
+        }
         json.dump(
             {
                 "matches": sorted(found),
@@ -784,6 +895,8 @@ async def main() -> None:
                 "text_resources": resource_results,
                 "geofenced_pages": geofenced_results,
                 "retried_blocked_assets": retried_blocked,
+                "debug_counts": debug_counts,
+                "crawl_audit": crawl_audit,
             },
             output,
             indent=2,
