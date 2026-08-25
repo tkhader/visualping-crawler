@@ -105,7 +105,7 @@ async def main() -> None:
     results: list[dict] = []
     image_results: list[dict] = []
     resource_results: list[dict] = []
-    debug_counts = {"canvas_seen": 0, "reveal_clicks": 0, "iframes_seen": 0, "pages_with_canvas": 0, "pages_with_iframe": 0, "selects_seen": 0, "checkboxes_radios_seen": 0, "header_checks_ok": 0, "header_checks_response_none": 0, "header_checks_failed": 0, "text_inputs_seen": 0}
+    debug_counts = {"canvas_seen": 0, "reveal_clicks": 0, "iframes_seen": 0, "pages_with_canvas": 0, "pages_with_iframe": 0, "selects_seen": 0, "checkboxes_radios_seen": 0, "header_checks_ok": 0, "header_checks_response_none": 0, "header_checks_failed": 0, "text_inputs_seen": 0, "websockets_seen": 0}
 
     def record(matches: set[str], source: str) -> None:
         for m in matches:
@@ -127,7 +127,6 @@ async def main() -> None:
         max_request_retries=1,
         browser_new_context_options=context_options,
     )
-
 
     async def scan_images(urls: set[str]) -> None:
         if not USERNAME or not PASSWORD:
@@ -252,6 +251,8 @@ async def main() -> None:
         page = context.page
 
         def handle_ws(ws):
+            debug_counts["websockets_seen"] += 1
+
             def on_frame(payload):
                 matches = extract_matches(str(payload))
                 if matches:
@@ -587,27 +588,54 @@ async def main() -> None:
 
     # Retry known geofenced pages through Tor (or another configured proxy)
     # exited in the required region, since a normal browser/httpx request
-    # from this machine's real IP will always get a 403 for these.
+    # from this machine's real IP will always get a 403 for these. Tor exit
+    # nodes rotate and can land outside the required country on any given
+    # circuit, so retry a few times, forcing a fresh circuit between attempts.
     geofenced_results: list[dict] = []
-    if USERNAME and PASSWORD:
+
+    def force_new_tor_circuit() -> None:
         try:
-            async with httpx.AsyncClient(auth=(USERNAME, PASSWORD), proxy=TOR_PROXY, timeout=30) as tor_client:
-                for path in KNOWN_GEOFENCED_PATHS:
-                    geofenced_url = urljoin(START_URL, path)
-                    try:
+            from stem import Signal
+            from stem.control import Controller
+
+            with Controller.from_port(port=9051) as controller:
+                controller.authenticate()
+                controller.signal(Signal.NEWNYM)
+        except Exception:
+            pass  # best-effort; if stem/control port isn't available, just retry as-is
+
+    if USERNAME and PASSWORD:
+        for path in KNOWN_GEOFENCED_PATHS:
+            geofenced_url = urljoin(START_URL, path)
+            attempts = []
+            success = False
+            for attempt in range(4):
+                try:
+                    async with httpx.AsyncClient(auth=(USERNAME, PASSWORD), proxy=TOR_PROXY, timeout=30) as tor_client:
                         response = await tor_client.get(geofenced_url)
-                        matches = extract_matches(response.text) if response.status_code == 200 else set()
+                    matches = extract_matches(response.text) if response.status_code == 200 else set()
+                    attempts.append({"attempt": attempt + 1, "status_code": response.status_code})
+                    if response.status_code == 200:
                         record(matches, f"geofenced_page:{geofenced_url}")
                         geofenced_results.append({
                             "url": geofenced_url,
                             "status_code": response.status_code,
                             "matches": sorted(matches),
+                            "attempts": attempts,
                         })
-                    except httpx.HTTPError as e:
-                        geofenced_results.append({"url": geofenced_url, "error": str(e)})
-        except Exception as e:
-            # Proxy not available (Tor not running, etc.) -- don't fail the whole run over it.
-            geofenced_results.append({"error": f"proxy unavailable: {e}"})
+                        success = True
+                        break
+                except (httpx.HTTPError, Exception) as e:
+                    attempts.append({"attempt": attempt + 1, "error": str(e)})
+
+                # Not successful yet -- force a new circuit before the next try
+                # (skip the wait after the final attempt).
+                if attempt < 3:
+                    force_new_tor_circuit()
+                    await asyncio.sleep(5)  # give Tor a moment to build the new circuit
+
+            if not success:
+                geofenced_results.append({"url": geofenced_url, "status_code": None, "matches": [], "attempts": attempts})
 
     with open("results.json", "w", encoding="utf-8") as output:
         json.dump(
