@@ -126,6 +126,12 @@ async def main() -> None:
     # requesting German content on every page throughout the whole crawl.
     context_options["extra_http_headers"] = {"Accept-Language": "de-DE,de;q=0.9,en;q=0.5"}
     context_options["locale"] = "de-DE"
+    # Default headless Chromium UA literally contains "HeadlessChrome" --
+    # a direct bot-detection giveaway. Use a realistic desktop Chrome UA.
+    context_options["user_agent"] = (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
+    )
 
     crawler = PlaywrightCrawler(
         max_requests_per_crawl=MAX_REQUESTS,
@@ -289,10 +295,30 @@ async def main() -> None:
                     continue
 
     @crawler.pre_navigation_hook
-    async def setup_websocket_capture(context: PlaywrightCrawlingContext) -> None:
+    async def setup_stealth_and_websocket_capture(context: PlaywrightCrawlingContext) -> None:
         # Must attach before navigation -- by the time the page handler runs,
-        # any WebSocket handshake during initial load has already happened.
+        # any WebSocket handshake during initial load has already happened,
+        # and any bot-detection JS on the page has already run its checks.
         page = context.page
+
+        # Mask common automation fingerprints. The persistent, recurring
+        # "session blocked (403)" warnings seen on every single run of this
+        # crawler are consistent with active bot-detection -- if so, some
+        # content may be silently served in a decoy/reduced form specifically
+        # to automated browsers rather than outright blocked. This patches
+        # the most commonly checked properties before any page script runs.
+        await page.add_init_script("""
+            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+            Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+            Object.defineProperty(navigator, 'languages', { get: () => ['de-DE', 'de', 'en-US', 'en'] });
+            window.chrome = window.chrome || { runtime: {} };
+            const originalQuery = window.navigator.permissions.query;
+            window.navigator.permissions.query = (parameters) => (
+                parameters.name === 'notifications'
+                    ? Promise.resolve({ state: Notification.permission })
+                    : originalQuery(parameters)
+            );
+        """)
 
         def handle_ws(ws):
             debug_counts["websockets_seen"] += 1
