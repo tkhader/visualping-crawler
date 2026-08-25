@@ -1,6 +1,6 @@
 {
   "unique_key": "http://54.214.7.161/products/webhook-domain",
-  "url": "http://54.214.7.161/products/webhook-domain/",
+  "url": "http://54.214.7.161/products/webhook-domain",
   "method": "GET",
   "payload": null,
   "headers": {},
@@ -14,5 +14,5 @@
   "retry_count": 0,
   "no_retry": false,
   "loaded_url": "http://54.214.7.161/products/webhook-domain/",
-  "handled_at": "2026-08-24 06:28:30.472270+00:00"
+  "handled_at": "2026-08-25 07:16:11.838612+00:00"
 }
