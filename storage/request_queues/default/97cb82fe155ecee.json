@@ -1,0 +1,18 @@
+{
+  "unique_key": "http://54.214.7.161/blog/crawler-viewport",
+  "url": "http://54.214.7.161/blog/crawler-viewport",
+  "method": "GET",
+  "payload": null,
+  "headers": {},
+  "user_data": {
+    "__crawlee": {
+      "state": 4,
+      "crawlDepth": 5
+    },
+    "depth": 5
+  },
+  "retry_count": 0,
+  "no_retry": false,
+  "loaded_url": "http://54.214.7.161/blog/crawler-viewport/",
+  "handled_at": "2026-08-24 06:28:33.100887+00:00"
+}

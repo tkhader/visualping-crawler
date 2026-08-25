@@ -1,0 +1,18 @@
+{
+  "unique_key": "http://54.214.7.161/help/cache-extract-anomaly",
+  "url": "http://54.214.7.161/help/cache-extract-anomaly/",
+  "method": "GET",
+  "payload": null,
+  "headers": {},
+  "user_data": {
+    "__crawlee": {
+      "state": 4,
+      "crawlDepth": 4
+    },
+    "depth": 4
+  },
+  "retry_count": 0,
+  "no_retry": false,
+  "loaded_url": "http://54.214.7.161/help/cache-extract-anomaly/",
+  "handled_at": "2026-08-24 06:28:15.133080+00:00"
+}

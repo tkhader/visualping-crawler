@@ -1,17 +1,18 @@
 {
   "unique_key": "http://54.214.7.161/blog",
-  "url": "http://54.214.7.161/blog/",
+  "url": "http://54.214.7.161/blog/?utm_source=internal",
   "method": "GET",
   "payload": null,
   "headers": {},
   "user_data": {
     "__crawlee": {
+      "state": 4,
       "crawlDepth": 2
     },
     "depth": 2
   },
   "retry_count": 0,
   "no_retry": false,
-  "loaded_url": null,
-  "handled_at": null
+  "loaded_url": "http://54.214.7.161/blog/?utm_source=internal",
+  "handled_at": "2026-08-24 06:27:01.745941+00:00"
 }

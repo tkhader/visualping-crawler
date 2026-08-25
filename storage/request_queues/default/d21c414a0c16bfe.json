@@ -1,0 +1,18 @@
+{
+  "unique_key": "http://54.214.7.161/wiki/filter-upstream",
+  "url": "http://54.214.7.161/wiki/filter-upstream",
+  "method": "GET",
+  "payload": null,
+  "headers": {},
+  "user_data": {
+    "__crawlee": {
+      "state": 4,
+      "crawlDepth": 5
+    },
+    "depth": 5
+  },
+  "retry_count": 0,
+  "no_retry": false,
+  "loaded_url": "http://54.214.7.161/wiki/filter-upstream/",
+  "handled_at": "2026-08-24 06:28:48.070778+00:00"
+}

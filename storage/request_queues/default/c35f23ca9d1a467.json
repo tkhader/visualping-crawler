@@ -1,0 +1,18 @@
+{
+  "unique_key": "http://54.214.7.161/notes/latency-ledger-anchor",
+  "url": "http://54.214.7.161/notes/latency-ledger-anchor/",
+  "method": "GET",
+  "payload": null,
+  "headers": {},
+  "user_data": {
+    "__crawlee": {
+      "state": 4,
+      "crawlDepth": 5
+    },
+    "depth": 5
+  },
+  "retry_count": 0,
+  "no_retry": false,
+  "loaded_url": "http://54.214.7.161/notes/latency-ledger-anchor/",
+  "handled_at": "2026-08-24 06:29:10.625890+00:00"
+}
